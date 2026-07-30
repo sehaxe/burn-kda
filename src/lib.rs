@@ -1,38 +1,22 @@
 //! # burn-kda — Kimi Delta Attention for Burn
 //!
-//! Per-channel lower-bounded decay with delta-rule state update (Kimi K3).
-//! Each memory channel has its own learnable decay factor, bounded from below
-//! for numerical stability. Delta-rule update writes new information as the
-//! difference between expected and actual value.
+//! | Component | What |
+//! |-----------|------|
+//! | `ChannelDecay` | Standalone per-channel learnable decay `[H, D]` in `[min_d, 1]` |
+//! | `kda_step` | One delta-rule step: decay → predict → correct → read |
+//! | `KdaModule` | GDN2 + per-channel lower-bounded decay — drop-in upgrade |
 //!
-//! | Paper | What |
-//! |-------|------|
-//! | Kimi K3 (Moonshot, 2026) | Per-channel decay, lower-bounded, delta-rule |
-//!
-//! ```text
-//! decay = min_decay + (1-min_decay) * sigmoid(raw_decay)  [H, D]
-//! S_t = S_{t-1} * decay_t                    state decay
-//! v_hat = S_t @ k_t                          predict
-//! e_t = beta_t * (v_t - v_hat)               delta error
-//! S_t += k_t @ e_t^T                         update state
-//! o_t = q_t @ S_t                            read output
-//! ```
-use burn::module::{Module, Param};
+//! Kimi K3 (Moonshot, 2026): 69 KDA layers with per-channel lower-bounded decay.
+use burn::module::Module;
 use burn::nn::Initializer;
 use burn::tensor::{activation, backend::Backend, Tensor};
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
 
-/// Per-channel lower-bounded decay for recurrent state.
-///
-/// `raw_decay`: `[H, D]` — learnable per-channel logits
-/// `min_decay`: minimum decay (e.g., 0.9 for KDA, 0.5 for conservative)
-///
-/// Returns `[H, D]` — bounded decay factors in `[min_decay, 1.0]`.
-///
-/// From Kimi K3: lower-bounded decay prevents catastrophic forgetting
-/// while still allowing selective channel erasure.
+// ─── Standalone Channel Decay ────────────────────────────────────────
+
 #[derive(Module, Debug)]
 pub struct ChannelDecay<B: Backend> {
-    pub raw: Param<Tensor<B, 2>>,
+    pub raw: burn::module::Param<Tensor<B, 2>>,
     pub min_decay: f64,
 }
 
@@ -44,7 +28,6 @@ impl<B: Backend> ChannelDecay<B> {
         }
     }
 
-    /// Bounded decay: `min_decay + (1-min_decay) * sigmoid(raw)`.
     pub fn forward(&self) -> Tensor<B, 2> {
         let raw = activation::sigmoid(self.raw.val());
         let alpha = 1.0 - self.min_decay;
@@ -52,13 +35,8 @@ impl<B: Backend> ChannelDecay<B> {
     }
 }
 
-/// Kimi Delta Attention step: state update with per-channel decay.
-///
-/// Applies one step of the delta rule:
-/// - Decay state with per-channel factors
-/// - Compute prediction error
-/// - Update state with delta correction
-/// - Read output
+// ─── KDA step ─────────────────────────────────────────────────────────
+
 pub fn kda_step<B: Backend>(
     state: Tensor<B, 4>,
     decay: Tensor<B, 2>,
@@ -84,6 +62,42 @@ pub fn kda_step<B: Backend>(
     (state, out)
 }
 
+// ─── KdaModule: GDN2 with per-channel lower-bounded decay ─────────────
+
+/// Drop-in upgrade for GatedDeltaNet2 with per-channel lower-bounded decay.
+///
+/// Creates a GDN2 with `min_decay` set, adding learned per-channel factors
+/// that guarantee a minimum decay floor. From Kimi K3.
+#[derive(Module, Debug)]
+pub struct KdaModule<B: Backend> {
+    pub gdn2: GatedDeltaNet2<B>,
+}
+
+impl<B: Backend> KdaModule<B> {
+    pub fn new(cfg: &Gdn2Config, min_decay: f64, device: &B::Device) -> Self {
+        let mut cfg = cfg.clone();
+        cfg.min_decay = Some(min_decay);
+        Self {
+            gdn2: GatedDeltaNet2::new(&cfg, device),
+        }
+    }
+
+    pub fn forward_train(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.gdn2.forward_train(x)
+    }
+
+    pub fn forward(
+        &self,
+        x: Tensor<B, 3>,
+        state: &mut Option<Tensor<B, 4>>,
+        update_state: bool,
+    ) -> Tensor<B, 3> {
+        self.gdn2.forward(x, state, update_state)
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,16 +111,14 @@ mod tests {
     #[test]
     fn channel_decay_range() {
         let d = ChannelDecay::<B>::new(4, 64, 0.9, &dev());
-        let vals: Vec<f32> = d
+        let v: Vec<f32> = d
             .forward()
             .into_data()
             .bytes
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
             .collect();
-        for v in vals {
-            assert!(v >= 0.89 && v <= 1.01, "decay {v} should be in [0.9, 1.0]");
-        }
+        assert!(v.iter().all(|x| (0.89..=1.01).contains(x)));
     }
     #[test]
     fn kda_step_shapes() {
@@ -115,8 +127,20 @@ mod tests {
         let q = Tensor::<B, 3>::random([2, 4, 32], Distribution::Default, &dev());
         let k = Tensor::<B, 3>::random([2, 4, 32], Distribution::Default, &dev());
         let v = Tensor::<B, 3>::random([2, 4, 64], Distribution::Default, &dev());
-        let (new_s, out) = kda_step(s, d, q, k, v, 0.5);
-        assert_eq!(new_s.dims(), [2, 4, 32, 64]);
-        assert_eq!(out.dims(), [2, 4, 64]);
+        let (ns, o) = kda_step(s, d, q, k, v, 0.5);
+        assert_eq!(ns.dims(), [2, 4, 32, 64]);
+        assert_eq!(o.dims(), [2, 4, 64]);
+    }
+    #[test]
+    fn kda_module_forward() {
+        let cfg = Gdn2Config {
+            hidden_size: 64,
+            num_heads: 2,
+            head_dim: 32,
+            ..Default::default()
+        };
+        let km = KdaModule::new(&cfg, 0.9, &dev());
+        let x = Tensor::<B, 3>::random([1, 4, 64], Distribution::Default, &dev());
+        assert_eq!(km.forward_train(x).dims(), [1, 4, 64]);
     }
 }
