@@ -10,7 +10,7 @@
 use burn::module::Module;
 use burn::nn::Initializer;
 use burn::tensor::{activation, backend::Backend, Tensor};
-use burn_gdn2::{GatedDeltaNet2, Gdn2Config, Gdn2Mode};
+use burn_gdn2::{GatedDeltaNet2, Gdn2Config};
 
 // ─── Standalone Channel Decay ────────────────────────────────────────
 
