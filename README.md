@@ -1,4 +1,4 @@
-# burn-kda — Kimi Delta Attention for Burn
+# burn-kda - Kimi Delta Attention for Burn
 
 [![CI](https://github.com/sehaxe/burn-kda/actions/workflows/ci.yml/badge.svg)](https://github.com/sehaxe/burn-kda/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/burn-kda)](https://crates.io/crates/burn-kda)

@@ -3,7 +3,7 @@ name = "burn-kda"
 version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0"
-description = "Kimi Delta Attention for Burn — per-channel lower-bounded decay + GDN2 wrapper (Kimi K3)"
+description = "Kimi Delta Attention for Burn - per-channel lower-bounded decay + GDN2 wrapper (Kimi K3)"
 keywords = ["burn", "kda", "delta", "attention", "recurrent"]
 repository = "https://github.com/sehaxe/burn-kda"
 homepage = "https://github.com/sehaxe/burn-kda"
@@ -16,7 +16,7 @@ std = ["burn/std", "burn-tensor/std", "burn-gdn2/std"]
 [dependencies]
 burn = { version = "0.21", default-features = false }
 burn-tensor = "0.21"
-burn-gdn2 = "0.2"
+burn-gdn2 = "0.3"
 
 [dev-dependencies]
 burn-ndarray = { version = "0.21", features = ["blas-openblas"] }
