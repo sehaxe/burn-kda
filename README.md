@@ -37,6 +37,14 @@ o_t = S_t^T q_t
   reused through the same WY mapping (no value-gate trick: `U` carries the
   `beta` write strength as the value gate).
 
+> **Training with `Autodiff<Cuda>`:** the fused kernels are forward-only and
+> not wired into burn's autodiff graph, so the standard training backend
+> `Autodiff<Cuda>` takes the (slower but exact) tensor chunk path. The fused
+> path only applies on the bare `CudaBare` backend, which has no automatic
+> gradients. The tensor path is numerically exact for any `chunk_size`
+> (burn-gdn2 0.5.1 tile scheme), so training is always correct — just not
+> kernel-speed until the kernels get hand-written backward passes.
+
 ## Install
 
 ```bash
