@@ -67,15 +67,22 @@ let (out_decode, state) = (0..T).fold((Tensor::zeros([..]), None), |..|);
 
 ## Numerical stability
 
-With `g_min = -5` a chunk of 64 accumulates log-decay down to -320, so
+With `g_min = -5` a naive chunk of 64 accumulates log-decay down to -320, so
 `1/Gamma = exp(320)` overflows f32 (the same reason K3 uses 16-token
-secondary tiles). The default `chunk_size = 16` keeps `1/Gamma < e^80`
-inside f32; larger chunks require tiled or log-space kernels.
+secondary tiles). Two layers of protection:
+
+- The tensor chunk path (burn-gdn2 0.5.1) computes decay tile-locally in log
+  space with inter-tile weights `exp(G_p - G_q) <= 1` and solves the WY
+  system per 16-token tile, so **any chunk size is exact** — `chunk_size: 64`
+  (the K3 paper setting) is supported.
+- The fused CUDA kernel reuses the GDN-2 kernel, which is only stable up to
+  `chunk_size = 16`; larger chunks fall back to the tensor path
+  automatically.
 
 ## Tests
 
-- 9 unit tests (decay bounds for both mappings, data-dependent beta,
-  chunk == decode for both mappings, gate modes, shapes).
+- 10 unit tests (decay bounds for both mappings, data-dependent beta,
+  chunk == decode for both mappings and for chunk 64, gate modes, shapes).
 - 3 CUDA tests (fused == tensor chunk, fused == decode for both mappings).
 
 > Papers: Kimi Linear (Moonshot, 2025); Kimi K3 (Moonshot, 2026).

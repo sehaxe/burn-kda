@@ -677,6 +677,24 @@ mod tests {
     }
 
     #[test]
+    fn chunk64_matches_decode() {
+        // K3-paper chunk size: the tensor chunk path (burn-gdn2 0.5.1 tile
+        // scheme) must stay exact for chunk 64 under weak decay too.
+        let mut c = cfg(64, 2, 16, DecayFn::Softplus);
+        c.chunk_size = 64;
+        let km = KdaModule::new(&c, 0.9, &dev());
+        let x = Tensor::<B, 3>::random([1, 128, 64], Distribution::Default, &dev());
+        let chunk_out = km.forward_train(x.clone());
+        let mut state: Option<Tensor<B, 4>> = None;
+        let decode_out = km.forward(x, &mut state, true);
+        let diff: f32 = (chunk_out - decode_out)
+            .powf_scalar(2.0)
+            .mean()
+            .into_scalar();
+        assert!(diff < 1e-4, "chunk64 vs decode mismatch mse {diff}");
+    }
+
+    #[test]
     fn beta_stays_in_unit_interval() {
         let km = KdaModule::<B>::new(&cfg(32, 2, 16, DecayFn::Sigmoid), 0.0, &dev());
         let x = Tensor::<B, 3>::random([1, 4, 32], Distribution::Default, &dev());

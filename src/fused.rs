@@ -51,6 +51,12 @@ pub mod cuda {
         if !is_cuda::<B>() {
             return None;
         }
+        // The reused GDN-2 kernel computes K/exp(cumsum(g)) in a single
+        // pass and overflows f32 for chunks > ~17 at g_min = -5 (exp(320)).
+        // The tensor path (burn-gdn2 0.5.1) is stable for any chunk size.
+        if chunk_size > 16 {
+            return None;
+        }
         burn_gdn2::kernel::chunk_cube::cuda::fused_chunk_forward::<B>(
             q, k, v, log_alpha, beta_k, beta_v, state, 1.0, chunk_size,
         )

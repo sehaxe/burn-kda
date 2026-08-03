@@ -1,6 +1,6 @@
 [package]
 name = "burn-kda"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "AGPL-3.0"
 description = "Kimi Delta Attention for Burn - data-dependent write strength, channel-wise decay (Kimi Linear + K3), fused CUDA chunk path"
