@@ -5,36 +5,77 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Burn](https://img.shields.io/badge/Burn-0.21-orange.svg)](https://burn.dev)
 
-Per-channel lower-bounded decay with delta-rule state update (Kimi K3).
-Each memory channel has its own learnable decay factor. Delta-rule update
-writes new information as the difference between expected and actual value.
+Complete implementation of Kimi Delta Attention (KDA) from
+[Kimi Linear](https://arxiv.org/abs/2510.26692) and
+[Kimi K3](https://arxiv.org/abs/2607.24653) (§2.1.1, Eqs 1-6).
 
-> Paper: Kimi K3 (Moonshot, 2026). 69 KDA layers + 24 Gated MLA layers.
+KDA extends the gated delta rule with a **channel-wise forget gate** and a
+data-dependent write strength. The core recurrence (Eq 1):
+
+```text
+S_t = (I - beta_t k_t k_t^T) Diag(alpha_t) S_{t-1} + beta_t k_t v_t^T
+o_t = S_t^T q_t
+```
+
+## What is implemented
+
+- **Data-dependent write strength** (K3 Eq 2): `beta_t^h = Sigmoid(W_beta^h x_t)`,
+  per-head and per-token - not a global scalar.
+- **Channel-wise decay** from a low-rank logit
+  `z_t = W_alpha^down(W_alpha^up x_t) + b_alpha` with rank = head_dim (both
+  papers) and per-head log-scale `A_h`, with two mappings:
+  - `DecayFn::Softplus` (Kimi Linear): `g = -exp(A_h) Softplus(z)`, `alpha in (0, 1)`
+  - `DecayFn::Sigmoid` (Kimi K3): `g = g_min Sigmoid(exp(A_h) z)`, fixed `g_min = -5`,
+    `alpha in (e^-5, 1)` - bounded, numerically safe
+- **q/k = L2Norm(Swish(ShortConv(Wx)))**, **v = Swish(ShortConv(W_v x))** (K3 Eq 2).
+- **Output gate** (K3 Eq 6): `y = W_o [Sigmoid(W_g x) * RMSNorm(o_t)]`, with
+  `GateMode::FullRank` (K3) or `GateMode::LowRank` (Kimi Linear Eq 10).
+- **Training**: chunked WY form (identical algebra to GDN-2 under the mapping
+  `b = beta`, `g = log(alpha)`, `w = beta`).
+- **Decoding**: exact per-token recurrence (Eq 1).
+- **Fused CUDA path** (`feature = "cuda"`): the GDN-2 chunked kernels are
+  reused through the same WY mapping (no value-gate trick: `U` carries the
+  `beta` write strength as the value gate).
 
 ## Install
 
 ```bash
 cargo add burn-kda
+# fused CUDA kernels:
+cargo add burn-kda --features cuda
 ```
 
 ## Quick start
 
 ```rust
-use burn_kda::{ChannelDecay, kda_step};
+use burn_kda::{DecayFn, GateMode, KdaConfig, KdaModule};
 
-let decay = ChannelDecay::new(8, 64, 0.9, &device); // 8 heads, 64-dim, min 0.9
-let d = decay.forward(); // [8, 64] in [0.9, 1.0]
+let cfg = KdaConfig {
+    hidden_size: 128,
+    num_heads: 4,
+    head_dim: 32,
+    decay_fn: DecayFn::Sigmoid, // or Softplus
+    gate: GateMode::FullRank,   // or LowRank
+    chunk_size: 16,             // stable for g_min = -5 in f32
+    ..Default::default()
+};
+let layer = KdaModule::new(&cfg, 0.0, &device);
 
-let (new_state, output) = kda_step(state, d, q, k, v, 0.5);
+let out_train = layer.forward_train(x);                 // chunked (WY) path
+let (out_decode, state) = (0..T).fold((Tensor::zeros([..]), None), |..|);
 ```
 
-## API
+## Numerical stability
 
-| Export | What |
-|--------|------|
-| `ChannelDecay` | Learnable per-channel decay `[H, D]` in `[min_decay, 1]` |
-| `kda_step` | One delta-rule step: decay → predict → correct → read |
+With `g_min = -5` a chunk of 64 accumulates log-decay down to -320, so
+`1/Gamma = exp(320)` overflows f32 (the same reason K3 uses 16-token
+secondary tiles). The default `chunk_size = 16` keeps `1/Gamma < e^80`
+inside f32; larger chunks require tiled or log-space kernels.
 
-## License
+## Tests
 
-AGPL-3.0. See [LICENSE](LICENSE).
+- 9 unit tests (decay bounds for both mappings, data-dependent beta,
+  chunk == decode for both mappings, gate modes, shapes).
+- 3 CUDA tests (fused == tensor chunk, fused == decode for both mappings).
+
+> Papers: Kimi Linear (Moonshot, 2025); Kimi K3 (Moonshot, 2026).

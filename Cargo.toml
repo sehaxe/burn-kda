@@ -1,9 +1,9 @@
 [package]
 name = "burn-kda"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "AGPL-3.0"
-description = "Kimi Delta Attention for Burn - per-channel lower-bounded decay + GDN2 wrapper (Kimi K3)"
+description = "Kimi Delta Attention for Burn - data-dependent write strength, channel-wise decay (Kimi Linear + K3), fused CUDA chunk path"
 keywords = ["burn", "kda", "delta", "attention", "recurrent"]
 repository = "https://github.com/sehaxe/burn-kda"
 homepage = "https://github.com/sehaxe/burn-kda"
@@ -12,11 +12,15 @@ readme = "README.md"
 [features]
 default = ["std"]
 std = ["burn/std", "burn-tensor/std", "burn-gdn2/std"]
+cuda = ["dep:burn-cuda", "dep:burn-cubecl", "dep:cubecl", "burn-gdn2/cuda"]
 
 [dependencies]
 burn = { version = "0.21", default-features = false }
 burn-tensor = "0.21"
-burn-gdn2 = "0.3"
+burn-gdn2 = { version = "0.5", default-features = false }
+burn-cuda = { version = "0.21", optional = true, default-features = false }
+burn-cubecl = { version = "0.21", optional = true, default-features = false }
+cubecl = { version = "0.10", optional = true, default-features = false }
 
 [dev-dependencies]
 burn-ndarray = { version = "0.21", features = ["blas-openblas"] }
