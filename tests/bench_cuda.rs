@@ -3,7 +3,6 @@
 //! fla chunk_kda (see bench_kda.py). Same scope: the chunked delta-rule
 //! attention only (no projections / conv / gate).
 
-use burn::backend::Autodiff;
 use burn::tensor::{Device, Distribution, Tensor};
 use burn_kda::fused::cuda::{kda_fused_chunk, CudaBare};
 
