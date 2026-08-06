@@ -7,8 +7,6 @@ use burn::backend::Autodiff;
 use burn::tensor::{Device, Distribution, Tensor};
 use burn_kda::fused::cuda::{kda_fused_chunk, CudaBare};
 
-type AD = Autodiff<CudaBare>;
-
 fn time_it(runs: usize, mut f: impl FnMut()) -> f64 {
     let t0 = std::time::Instant::now();
     for _ in 0..runs {
