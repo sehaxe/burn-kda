@@ -100,9 +100,9 @@ impl KdaConfig {
         }
     }
 }
-use burn::backend::Backend;
 #[cfg(feature = "autodiff")]
 use burn::backend::AutodiffBackend;
+use burn::backend::Backend;
 use burn::backend::DispatchKindConversion;
 use burn::module::{Module, Param};
 use burn::nn::{Initializer, Linear, LinearConfig};
