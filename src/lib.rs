@@ -538,7 +538,15 @@ impl KdaModule {
         let [_, hv, _, _] = v.shape().dims::<4>();
         let state = Tensor::zeros([batch, hv, self.head_dim, self.v_head_dim], &q.device());
         let (o, _) = burn_gdn2::chunk_autodiff_or_plain::<B::InnerBackend>(
-            q, k, v, g, b_k, b_v, state, 1.0, self.chunk_size,
+            q,
+            k,
+            v,
+            g,
+            b_k,
+            b_v,
+            state,
+            1.0,
+            self.chunk_size,
         );
         self.output(o, gate)
     }
@@ -599,9 +607,9 @@ impl KdaModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::tensor::Distribution;
     use burn::backend::NdArray;
     use burn::tensor::Device;
+    use burn::tensor::Distribution;
     fn dev() -> Device {
         Device::ndarray()
     }
