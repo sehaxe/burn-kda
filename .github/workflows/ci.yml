@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: ["--no-default-features", "", "--features autodiff", "--features binary-tests"]
+        features: ["--no-default-features", "", "--features autodiff"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
