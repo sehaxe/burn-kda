@@ -100,11 +100,13 @@ impl KdaConfig {
         }
     }
 }
-use burn::backend::{AutodiffBackend, Backend, DispatchKindConversion};
+use burn::backend::Backend;
+#[cfg(feature = "autodiff")]
+use burn::backend::AutodiffBackend;
+use burn::backend::DispatchKindConversion;
 use burn::module::{Module, Param};
 use burn::nn::{Initializer, Linear, LinearConfig};
 use burn::tensor::{activation, Device, DispatchTensor, Tensor};
-#[cfg(feature = "autodiff")]
 use burn_gdn2::{chunk_wy_forward, l2_normalize, short_conv_1d, Gdn2Config};
 
 pub mod fused;
