@@ -18,12 +18,11 @@
 
 #[cfg(feature = "cuda")]
 pub mod cuda {
-    use burn::tensor::backend::Backend;
-    use burn::tensor::Tensor;
-    use burn_cubecl::CubeBackend;
+    use burn::backend::{Backend, DispatchKindConversion};
+    use burn::tensor::{DispatchTensor, Tensor};
     use std::any::TypeId;
 
-    pub type CudaBare = CubeBackend<cubecl::cuda::CudaRuntime, f32, i32, u8>;
+    pub type CudaBare = burn_gdn2::CudaBare;
 
     fn is_cuda<B: Backend>() -> bool {
         TypeId::of::<B>() == TypeId::of::<CudaBare>()
@@ -39,21 +38,24 @@ pub mod cuda {
     /// Returns `(out [B,H,T,V], state)` if the fused path applies.
     #[allow(clippy::too_many_arguments)]
     pub fn kda_fused_chunk<B: Backend>(
-        q: Tensor<B, 4>,
-        k: Tensor<B, 4>,
-        v: Tensor<B, 4>,
-        log_alpha: Tensor<B, 4>,
-        beta_k: Tensor<B, 4>,
-        beta_v: Tensor<B, 4>,
-        state: Tensor<B, 4>,
+        q: Tensor<4>,
+        k: Tensor<4>,
+        v: Tensor<4>,
+        log_alpha: Tensor<4>,
+        beta_k: Tensor<4>,
+        beta_v: Tensor<4>,
+        state: Tensor<4>,
         chunk_size: usize,
-    ) -> Option<(Tensor<B, 4>, Tensor<B, 4>)> {
+    ) -> Option<(Tensor<4>, Tensor<4>)>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
         if !is_cuda::<B>() {
             return None;
         }
-        // The reused GDN-2 kernel computes K/exp(cumsum(g)) in a single
-        // pass and overflows f32 for chunks > ~17 at g_min = -5 (exp(320)).
-        // The tensor path (burn-gdn2 0.5.1) is stable for any chunk size.
+        // Numerical limit of the reused GDN-2 kernel: K/exp(cumsum(g))
+        // underflows f32 once cumsum(g) < -88, i.e. chunk > 17 at the K3
+        // floor g = -5. FlashKDA picked chunk 16 for exactly this reason.
         if chunk_size > 16 {
             return None;
         }

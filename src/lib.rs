@@ -100,9 +100,11 @@ impl KdaConfig {
         }
     }
 }
+use burn::backend::{AutodiffBackend, Backend, DispatchKindConversion};
 use burn::module::{Module, Param};
 use burn::nn::{Initializer, Linear, LinearConfig};
-use burn::tensor::{activation, backend::Backend, Tensor};
+use burn::tensor::{activation, Device, DispatchTensor, Tensor};
+#[cfg(feature = "autodiff")]
 use burn_gdn2::{chunk_wy_forward, l2_normalize, short_conv_1d, Gdn2Config};
 
 pub mod fused;
@@ -117,19 +119,19 @@ pub mod fused;
 /// alpha_t = exp(g_t)  in (e^{g_min}, 1)
 /// ```
 #[derive(Module, Debug)]
-pub struct KdaDecay<B: Backend> {
-    pub w_up: Linear<B>,
-    pub w_down: Linear<B>,
-    pub b_alpha: Param<Tensor<B, 1>>,
+pub struct KdaDecay {
+    pub w_up: Linear,
+    pub w_down: Linear,
+    pub b_alpha: Param<Tensor<1>>,
     /// Per-head log-scale `A_h` (Eq 5), shape `[n_heads, 1]`.
-    pub a_log: Param<Tensor<B, 2>>,
+    pub a_log: Param<Tensor<2>>,
     #[module(skip)]
     pub g_min: f64,
     #[module(skip)]
     pub decay_fn: DecayFn,
 }
 
-impl<B: Backend> KdaDecay<B> {
+impl KdaDecay {
     /// `rank`: low-rank logit dimension `r` (both papers use `rank = head_dim`).
     /// `g_min`: log-space decay floor; K3 fixes it at -5; pass
     /// `ln(min_decay)` to reinterpret a decay-space floor.
@@ -140,7 +142,7 @@ impl<B: Backend> KdaDecay<B> {
         rank: usize,
         g_min: f64,
         decay_fn: DecayFn,
-        device: &B::Device,
+        device: &Device,
     ) -> Self {
         let init = Initializer::Normal {
             mean: 0.0,
@@ -163,11 +165,11 @@ impl<B: Backend> KdaDecay<B> {
     }
 
     /// `x`: `[B, T, D]` hidden states. Returns `alpha [B, T, H, HD]`.
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 4> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<4> {
         let z = self.w_down.forward(self.w_up.forward(x));
-        let [b2, t2, hd2] = z.dims();
+        let [b2, t2, hd2] = z.shape().dims::<3>();
         let z = z.add(self.b_alpha.val().clone().reshape([1, 1, hd2]));
-        let n_heads = self.a_log.val().dims()[0];
+        let n_heads = self.a_log.val().shape().dims::<2>()[0];
         let head_dim = hd2 / n_heads;
         let z_h = z.reshape([b2, t2, n_heads, head_dim]);
         let scaled = z_h.mul(self.a_log.val().clone().reshape([1, 1, n_heads, 1]).exp());
@@ -190,14 +192,14 @@ impl<B: Backend> KdaDecay<B> {
 ///
 /// Returns `(state, out [B, H, DV])`.
 pub fn kda_step<B: Backend>(
-    state: Tensor<B, 4>,
-    decay: Tensor<B, 2>,
-    q: Tensor<B, 3>,
-    k: Tensor<B, 3>,
-    v: Tensor<B, 3>,
+    state: Tensor<4>,
+    decay: Tensor<2>,
+    q: Tensor<3>,
+    k: Tensor<3>,
+    v: Tensor<3>,
     beta: f64,
-) -> (Tensor<B, 4>, Tensor<B, 3>) {
-    let [b, h, dk, dv] = state.dims();
+) -> (Tensor<4>, Tensor<3>) {
+    let [b, h, dk, dv] = state.shape().dims::<4>();
 
     let state = state.mul(decay.clone().reshape([1, h, dk, 1]));
     let v_hat = state
@@ -223,25 +225,25 @@ pub fn kda_step<B: Backend>(
 /// `v = SiLU(ShortConv(Linear(x)))`; decay from Eq 2/5; scalar `beta`;
 /// output gate `Sigmoid(W_g x) * RMSNorm(o)` before `o_proj`.
 #[derive(Module, Debug)]
-pub struct KdaModule<B: Backend> {
-    pub q_proj: Linear<B>,
-    pub k_proj: Linear<B>,
-    pub v_proj: Linear<B>,
-    pub q_conv_w: Option<Param<Tensor<B, 2>>>,
-    pub k_conv_w: Option<Param<Tensor<B, 2>>>,
-    pub v_conv_w: Option<Param<Tensor<B, 2>>>,
-    pub decay: KdaDecay<B>,
+pub struct KdaModule {
+    pub q_proj: Linear,
+    pub k_proj: Linear,
+    pub v_proj: Linear,
+    pub q_conv_w: Option<Param<Tensor<2>>>,
+    pub k_conv_w: Option<Param<Tensor<2>>>,
+    pub v_conv_w: Option<Param<Tensor<2>>>,
+    pub decay: KdaDecay,
     /// Data-dependent write strength (K3 Eq 2): `beta_t^h = Sigmoid(W_beta^h x_t)`.
-    pub beta_proj: Linear<B>,
+    pub beta_proj: Linear,
     /// Output gate: full-rank `W_g` (K3 Eq 6) or low-rank pair (Kimi Linear
     /// Eq 10): `Sigmoid(W_g^down(W_g^up x))`.
-    pub o_gate: Option<Linear<B>>,
-    pub o_gate_up: Option<Linear<B>>,
-    pub o_gate_down: Option<Linear<B>>,
+    pub o_gate: Option<Linear>,
+    pub o_gate_up: Option<Linear>,
+    pub o_gate_down: Option<Linear>,
     #[module(skip)]
     pub gate: GateMode,
-    pub o_norm_w: Param<Tensor<B, 1>>,
-    pub o_proj: Linear<B>,
+    pub o_norm_w: Param<Tensor<1>>,
+    pub o_proj: Linear,
     #[module(skip)]
     pub d_model: usize,
     #[module(skip)]
@@ -260,11 +262,11 @@ pub struct KdaModule<B: Backend> {
     pub norm_eps: f64,
 }
 
-impl<B: Backend> KdaModule<B> {
+impl KdaModule {
     /// Builds a KDA layer from a [`KdaConfig`].
     /// `min_decay`: decay-space floor, reinterpreted as the log-space
     /// `g_min = ln(min_decay)`; `min_decay <= 0` uses the config's `g_min`.
-    pub fn new(cfg: &KdaConfig, min_decay: f64, device: &B::Device) -> Self {
+    pub fn new(cfg: &KdaConfig, min_decay: f64, device: &Device) -> Self {
         let d = cfg.hidden_size;
         let h = cfg.num_heads;
         let hk = cfg.head_dim;
@@ -280,7 +282,7 @@ impl<B: Backend> KdaModule<B> {
         } else {
             cfg.g_min
         };
-        let conv = |dim: usize| -> Option<Param<Tensor<B, 2>>> {
+        let conv = |dim: usize| -> Option<Param<Tensor<2>>> {
             cfg.use_short_conv.then(|| {
                 Initializer::Normal {
                     mean: 0.0,
@@ -351,15 +353,15 @@ impl<B: Backend> KdaModule<B> {
     #[allow(clippy::type_complexity)]
     pub fn project_for_test(
         &self,
-        x: Tensor<B, 3>,
+        x: Tensor<3>,
     ) -> (
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
     ) {
         self.project(x)
     }
@@ -367,22 +369,22 @@ impl<B: Backend> KdaModule<B> {
     #[allow(clippy::type_complexity)]
     fn project(
         &self,
-        x: Tensor<B, 3>,
+        x: Tensor<3>,
     ) -> (
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
+        Tensor<4>,
     ) {
-        let [batch, tokens, _] = x.dims();
+        let [batch, tokens, _] = x.shape().dims::<3>();
         let h = self.n_heads;
         let hk = self.head_dim;
         let hv = self.n_v_heads;
         let vd = self.v_head_dim;
-        let to_4d = |t: Tensor<B, 3>, n: usize, d: usize| -> Tensor<B, 4> {
+        let to_4d = |t: Tensor<3>, n: usize, d: usize| -> Tensor<4> {
             let [b, tt, _] = t.shape().dims::<3>();
             t.reshape([b, tt, n, d]).permute([0, 2, 1, 3])
         };
@@ -411,7 +413,7 @@ impl<B: Backend> KdaModule<B> {
         let k_norm = l2_normalize(k_act, 1e-6);
 
         let alpha = self.decay.forward(x.clone()); // [B, T, H, HD]
-        let [_, _, _, hd] = alpha.dims();
+        let [_, _, _, hd] = alpha.shape().dims::<4>();
         let log_decay = alpha.log().permute([0, 2, 1, 3]); // [B, H, T, HD]
         let _ = hd;
 
@@ -430,7 +432,7 @@ impl<B: Backend> KdaModule<B> {
         // Repeat key-side tensors for grouped value attention (GVA)
         if hv > h {
             let rep = hv / h;
-            let r = |t: Tensor<B, 4>| -> Tensor<B, 4> {
+            let r = |t: Tensor<4>| -> Tensor<4> {
                 t.unsqueeze_dim::<5>(3)
                     .repeat(&[1, 1, 1, rep, 1])
                     .reshape([batch, hv, tokens, hk])
@@ -459,8 +461,8 @@ impl<B: Backend> KdaModule<B> {
         (q_4d, k_4d, v_4d, g_4d, b_k, b_v, gate_4d)
     }
 
-    fn output(&self, attn_out: Tensor<B, 4>, gate: Tensor<B, 4>) -> Tensor<B, 3> {
-        let [b, hv, t, vd] = attn_out.dims();
+    fn output(&self, attn_out: Tensor<4>, gate: Tensor<4>) -> Tensor<3> {
+        let [b, hv, t, vd] = attn_out.shape().dims::<4>();
         let rms = attn_out
             .clone()
             .powf_scalar(2.0)
@@ -480,10 +482,13 @@ impl<B: Backend> KdaModule<B> {
     /// With `feature = "cuda"` on the bare CUDA backend this dispatches to the
     /// fused chunked kernels (see `fused`); every other backend uses the
     /// tensor-ops chunk path. Both compute the same WY form.
-    pub fn forward_train(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [batch, _t, _] = x.dims();
+    pub fn forward_train<B: Backend>(&self, x: Tensor<3>) -> Tensor<3>
+    where
+        DispatchTensor: DispatchKindConversion<B>,
+    {
+        let [batch, _t, _] = x.shape().dims::<3>();
         let (q, k, v, g, b_k, b_v, gate) = self.project(x);
-        let [_, hv, _, _] = v.dims();
+        let [_, hv, _, _] = v.shape().dims::<4>();
         let state = Tensor::zeros([batch, hv, self.head_dim, self.v_head_dim], &q.device());
         let out = {
             #[cfg(feature = "cuda")]
@@ -515,19 +520,42 @@ impl<B: Backend> KdaModule<B> {
         self.output(out, gate)
     }
 
+    /// Training forward through the fused autodiff op of burn-gdn2: the whole
+    /// chunked WY recurrence runs as ONE autodiff node with an exact
+    /// matrix-level backward (the fused CUDA kernels run the forward on
+    /// `CudaBare`; the backward never re-runs the forward). Same result as
+    /// [`forward_train`](Self::forward_train), much faster on
+    /// `Autodiff<B>` backends.
+    #[cfg(feature = "autodiff")]
+    pub fn forward_train_fused<B: AutodiffBackend>(&self, x: Tensor<3>) -> Tensor<3>
+    where
+        DispatchTensor: DispatchKindConversion<B>
+            + DispatchKindConversion<B::InnerBackend>
+            + DispatchKindConversion<burn_autodiff::Autodiff<B::InnerBackend>>,
+    {
+        let [batch, _t, _] = x.shape().dims::<3>();
+        let (q, k, v, g, b_k, b_v, gate) = self.project(x);
+        let [_, hv, _, _] = v.shape().dims::<4>();
+        let state = Tensor::zeros([batch, hv, self.head_dim, self.v_head_dim], &q.device());
+        let (o, _) = burn_gdn2::chunk_autodiff_or_plain::<B::InnerBackend>(
+            q, k, v, g, b_k, b_v, state, 1.0, self.chunk_size,
+        );
+        self.output(o, gate)
+    }
+
     /// Decode forward: exact per-token recurrence (Eq 1).
     ///
     /// `update_state=true`: state is decayed/updated per token (autoregressive
     /// decoding). `update_state=false`: read-only prefill over the state.
     pub fn forward(
         &self,
-        x: Tensor<B, 3>,
-        state: &mut Option<Tensor<B, 4>>,
+        x: Tensor<3>,
+        state: &mut Option<Tensor<4>>,
         update_state: bool,
-    ) -> Tensor<B, 3> {
-        let [batch, tokens, _] = x.dims();
+    ) -> Tensor<3> {
+        let [batch, tokens, _] = x.shape().dims::<3>();
         let (q, k, v, g, b, _b_v, gate) = self.project(x.clone());
-        let [_, hv, _, _] = v.dims();
+        let [_, hv, _, _] = v.shape().dims::<4>();
         let dev = q.device();
         let s = state
             .take()
@@ -572,10 +600,10 @@ impl<B: Backend> KdaModule<B> {
 mod tests {
     use super::*;
     use burn::tensor::Distribution;
-    use burn_ndarray::{NdArray, NdArrayDevice};
-    type B = NdArray;
-    fn dev() -> NdArrayDevice {
-        NdArrayDevice::default()
+    use burn::backend::NdArray;
+    use burn::tensor::Device;
+    fn dev() -> Device {
+        Device::ndarray()
     }
     fn cfg(hidden: usize, heads: usize, head_dim: usize, decay_fn: DecayFn) -> KdaConfig {
         KdaConfig {
@@ -591,8 +619,8 @@ mod tests {
     #[test]
     fn kda_decay_bounds() {
         // K3 Eq 5: alpha = exp(g_min*sigmoid(...)) in (e^{g_min}, 1)
-        let dec = KdaDecay::<B>::new(32, 4, 16, 16, G_MIN, DecayFn::Sigmoid, &dev());
-        let x = Tensor::<B, 3>::random([2, 8, 32], Distribution::Default, &dev());
+        let dec = KdaDecay::new(32, 4, 16, 16, G_MIN, DecayFn::Sigmoid, &dev());
+        let x = Tensor::<3>::random([2, 8, 32], Distribution::Default, &dev());
         let alpha = dec.forward(x.clone());
         let vals: Vec<f32> = alpha
             .into_data()
@@ -607,7 +635,7 @@ mod tests {
             &vals[..8]
         );
         // Kimi Linear: alpha in (0, 1) - unbounded below
-        let dec2 = KdaDecay::<B>::new(32, 4, 16, 16, G_MIN, DecayFn::Softplus, &dev());
+        let dec2 = KdaDecay::new(32, 4, 16, 16, G_MIN, DecayFn::Softplus, &dev());
         let alpha2 = dec2.forward(x.clone());
         let vals2: Vec<f32> = alpha2
             .into_data()
@@ -626,9 +654,9 @@ mod tests {
     fn kda_decay_is_data_dependent() {
         // Eq 2: the logit is a function of x - two different inputs give
         // different decays.
-        let dec = KdaDecay::<B>::new(32, 2, 16, 16, G_MIN, DecayFn::Sigmoid, &dev());
-        let x1 = Tensor::<B, 3>::ones([1, 4, 32], &dev());
-        let x2 = Tensor::<B, 3>::ones([1, 4, 32], &dev()).mul_scalar(-2.0);
+        let dec = KdaDecay::new(32, 2, 16, 16, G_MIN, DecayFn::Sigmoid, &dev());
+        let x1 = Tensor::<3>::ones([1, 4, 32], &dev());
+        let x2 = Tensor::<3>::ones([1, 4, 32], &dev()).mul_scalar(-2.0);
         let a1 = dec.forward(x1);
         let a2 = dec.forward(x2);
         let d: Vec<f32> = (a1 - a2)
@@ -644,12 +672,12 @@ mod tests {
 
     #[test]
     fn kda_step_shapes() {
-        let s = Tensor::<B, 4>::zeros([2, 4, 32, 64], &dev());
-        let d = Tensor::<B, 2>::ones([4, 32], &dev()).mul_scalar(0.95);
-        let q = Tensor::<B, 3>::random([2, 4, 32], Distribution::Default, &dev());
-        let k = Tensor::<B, 3>::random([2, 4, 32], Distribution::Default, &dev());
-        let v = Tensor::<B, 3>::random([2, 4, 64], Distribution::Default, &dev());
-        let (ns, o) = kda_step(s, d, q, k, v, 0.5);
+        let s = Tensor::<4>::zeros([2, 4, 32, 64], &dev());
+        let d = Tensor::<2>::ones([4, 32], &dev()).mul_scalar(0.95);
+        let q = Tensor::<3>::random([2, 4, 32], Distribution::Default, &dev());
+        let k = Tensor::<3>::random([2, 4, 32], Distribution::Default, &dev());
+        let v = Tensor::<3>::random([2, 4, 64], Distribution::Default, &dev());
+        let (ns, o) = kda_step::<NdArray>(s, d, q, k, v, 0.5);
         assert_eq!(ns.dims(), [2, 4, 32, 64]);
         assert_eq!(o.dims(), [2, 4, 64]);
     }
@@ -657,17 +685,17 @@ mod tests {
     #[test]
     fn kda_module_forward() {
         let km = KdaModule::new(&cfg(64, 2, 32, DecayFn::Sigmoid), 0.9, &dev());
-        let x = Tensor::<B, 3>::random([1, 4, 64], Distribution::Default, &dev());
-        assert_eq!(km.forward_train(x).dims(), [1, 4, 64]);
+        let x = Tensor::<3>::random([1, 4, 64], Distribution::Default, &dev());
+        assert_eq!(km.forward_train::<NdArray>(x).dims(), [1, 4, 64]);
     }
 
     #[test]
     fn chunk_matches_decode() {
         // The chunked training path must equal the per-token recurrence.
         let km = KdaModule::new(&cfg(64, 2, 16, DecayFn::Sigmoid), 0.9, &dev());
-        let x = Tensor::<B, 3>::random([1, 17, 64], Distribution::Default, &dev());
-        let chunk_out = km.forward_train(x.clone());
-        let mut state: Option<Tensor<B, 4>> = None;
+        let x = Tensor::<3>::random([1, 17, 64], Distribution::Default, &dev());
+        let chunk_out = km.forward_train::<NdArray>(x.clone());
+        let mut state: Option<Tensor<4>> = None;
         let decode_out = km.forward(x, &mut state, true);
         let diff: f32 = (chunk_out - decode_out)
             .powf_scalar(2.0)
@@ -683,9 +711,9 @@ mod tests {
         let mut c = cfg(64, 2, 16, DecayFn::Softplus);
         c.chunk_size = 64;
         let km = KdaModule::new(&c, 0.9, &dev());
-        let x = Tensor::<B, 3>::random([1, 128, 64], Distribution::Default, &dev());
-        let chunk_out = km.forward_train(x.clone());
-        let mut state: Option<Tensor<B, 4>> = None;
+        let x = Tensor::<3>::random([1, 128, 64], Distribution::Default, &dev());
+        let chunk_out = km.forward_train::<NdArray>(x.clone());
+        let mut state: Option<Tensor<4>> = None;
         let decode_out = km.forward(x, &mut state, true);
         let diff: f32 = (chunk_out - decode_out)
             .powf_scalar(2.0)
@@ -696,8 +724,8 @@ mod tests {
 
     #[test]
     fn beta_stays_in_unit_interval() {
-        let km = KdaModule::<B>::new(&cfg(32, 2, 16, DecayFn::Sigmoid), 0.0, &dev());
-        let x = Tensor::<B, 3>::random([1, 4, 32], Distribution::Default, &dev());
+        let km = KdaModule::new(&cfg(32, 2, 16, DecayFn::Sigmoid), 0.0, &dev());
+        let x = Tensor::<3>::random([1, 4, 32], Distribution::Default, &dev());
         let beta = activation::sigmoid(km.beta_proj.forward(x));
         let vals: Vec<f32> = beta
             .into_data()
@@ -715,7 +743,7 @@ mod tests {
     #[test]
     fn low_rank_gate_matches_full_rank_shapes() {
         // Both gate modes produce the same output shape.
-        let km_low = KdaModule::<B>::new(
+        let km_low = KdaModule::new(
             &KdaConfig {
                 gate: GateMode::LowRank,
                 ..cfg(64, 2, 32, DecayFn::Sigmoid)
@@ -723,7 +751,7 @@ mod tests {
             0.9,
             &dev(),
         );
-        let km_full = KdaModule::<B>::new(
+        let km_full = KdaModule::new(
             &KdaConfig {
                 gate: GateMode::FullRank,
                 ..cfg(64, 2, 32, DecayFn::Sigmoid)
@@ -731,20 +759,20 @@ mod tests {
             0.9,
             &dev(),
         );
-        let x = Tensor::<B, 3>::random([1, 4, 64], Distribution::Default, &dev());
+        let x = Tensor::<3>::random([1, 4, 64], Distribution::Default, &dev());
         assert_eq!(
-            km_low.forward_train(x.clone()).dims(),
-            km_full.forward_train(x).dims()
+            km_low.forward_train::<NdArray>(x.clone()).dims(),
+            km_full.forward_train::<NdArray>(x).dims()
         );
     }
 
     #[test]
     fn softplus_chunk_matches_decode() {
         // Kimi Linear decay mapping: chunk (WY) == per-token recurrence.
-        let km = KdaModule::<B>::new(&cfg(64, 2, 16, DecayFn::Softplus), 0.0, &dev());
-        let x = Tensor::<B, 3>::random([1, 17, 64], Distribution::Default, &dev());
-        let chunk_out = km.forward_train(x.clone());
-        let mut state: Option<Tensor<B, 4>> = None;
+        let km = KdaModule::new(&cfg(64, 2, 16, DecayFn::Softplus), 0.0, &dev());
+        let x = Tensor::<3>::random([1, 17, 64], Distribution::Default, &dev());
+        let chunk_out = km.forward_train::<NdArray>(x.clone());
+        let mut state: Option<Tensor<4>> = None;
         let decode_out = km.forward(x, &mut state, true);
         let diff: f32 = (chunk_out - decode_out)
             .powf_scalar(2.0)
@@ -757,9 +785,9 @@ mod tests {
     fn beta_is_data_dependent() {
         // K3 Eq 2: beta_t^h = Sigmoid(W_beta^h x_t) - different inputs must
         // give different write strengths (not a global scalar).
-        let km = KdaModule::<B>::new(&cfg(32, 2, 16, DecayFn::Sigmoid), 0.0, &dev());
-        let x1 = Tensor::<B, 3>::ones([1, 4, 32], &dev());
-        let x2 = Tensor::<B, 3>::ones([1, 4, 32], &dev()).mul_scalar(-3.0);
+        let km = KdaModule::new(&cfg(32, 2, 16, DecayFn::Sigmoid), 0.0, &dev());
+        let x1 = Tensor::<3>::ones([1, 4, 32], &dev());
+        let x2 = Tensor::<3>::ones([1, 4, 32], &dev()).mul_scalar(-3.0);
         let b1 = activation::sigmoid(km.beta_proj.forward(x1));
         let b2 = activation::sigmoid(km.beta_proj.forward(x2));
         let d: Vec<f32> = (b1 - b2)

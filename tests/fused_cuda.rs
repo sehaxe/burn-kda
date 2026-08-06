@@ -20,9 +20,9 @@ fn cfg() -> KdaConfig {
 fn fused_matches_decode() {
     type Bare = burn_kda::fused::cuda::CudaBare;
     let dev = Default::default();
-    let km = KdaModule::<Bare>::new(&cfg(), 0.0, &dev);
-    let x = Tensor::<Bare, 3>::random([1, 64, 128], Distribution::Normal(0.0, 1.0), &dev);
-    let fused = km.forward_train(x.clone());
+    let km = KdaModule::new(&cfg(), 0.0, &dev);
+    let x = Tensor::<3>::random([1, 64, 128], Distribution::Normal(0.0, 1.0), &dev);
+    let fused = km.forward_train::<Bare>(x.clone());
     let mut state = None;
     let decode = km.forward(x, &mut state, true);
     let dmax: f32 = (fused - decode)
@@ -44,9 +44,9 @@ fn fused_matches_decode_softplus() {
         decay_fn: DecayFn::Softplus,
         ..cfg()
     };
-    let km = KdaModule::<Bare>::new(&c, 0.0, &dev);
-    let x = Tensor::<Bare, 3>::random([1, 64, 128], Distribution::Normal(0.0, 1.0), &dev);
-    let fused = km.forward_train(x.clone());
+    let km = KdaModule::new(&c, 0.0, &dev);
+    let x = Tensor::<3>::random([1, 64, 128], Distribution::Normal(0.0, 1.0), &dev);
+    let fused = km.forward_train::<Bare>(x.clone());
     let mut state = None;
     let decode = km.forward(x, &mut state, true);
     let dmax: f32 = (fused - decode)
@@ -67,15 +67,15 @@ fn fused_matches_decode_softplus() {
 fn fused_matches_tensor_chunk() {
     type Bare = burn_kda::fused::cuda::CudaBare;
     let dev = Default::default();
-    let km = KdaModule::<Bare>::new(&cfg(), 0.0, &dev);
-    let x = Tensor::<Bare, 3>::random([1, 32, 128], Distribution::Normal(0.0, 1.0), &dev);
+    let km = KdaModule::new(&cfg(), 0.0, &dev);
+    let x = Tensor::<3>::random([1, 32, 128], Distribution::Normal(0.0, 1.0), &dev);
     let proj = km.project_for_test(x);
     let q = proj.0;
     let k = proj.1;
     let v = proj.2;
     let log_alpha = proj.3;
     let beta = proj.4;
-    let state = Tensor::<Bare, 4>::zeros([1, 4, 32, 32], &dev);
+    let state = Tensor::<4>::zeros([1, 4, 32, 32], &dev);
 
     let (fused_out, _) = burn_kda::fused::cuda::kda_fused_chunk::<Bare>(
         q.clone(),
@@ -107,4 +107,24 @@ fn fused_matches_tensor_chunk() {
         dmax < 2e-3,
         "fused vs tensor-chunk mismatch max_diff {dmax:.3e}"
     );
+}
+
+/// The fused autodiff op must flow gradients through the KDA module on CUDA.
+#[cfg(feature = "autodiff")]
+#[test]
+fn fused_train_grads_flow_cuda() {
+    use burn::backend::Autodiff;
+    type AD = Autodiff<burn_kda::fused::cuda::CudaBare>;
+    let dev = burn::tensor::Device::autodiff(Default::default());
+    let km = KdaModule::new(&cfg(), 0.0, &dev);
+    let x = Tensor::<3>::random([1, 64, 128], Distribution::Normal(0.0, 1.0), &dev).require_grad();
+    let loss = km
+        .forward_train_fused::<AD>(x.clone())
+        .powf_scalar(2.0)
+        .mean();
+    let _ = loss.clone().into_data();
+    let grads = loss.backward();
+    let g: f32 = x.grad(&grads).unwrap().clone().abs().max().into_scalar();
+    assert!(g > 0.0, "no gradient through the fused op: {g}");
+    println!("fused op grads ok (max {g:.4})");
 }
