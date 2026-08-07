@@ -100,17 +100,18 @@ GPU (RTX 5060 Ti), warmup + averaged. burn side: `tests/bench_cuda.rs`
 (fused kernels forward, fused autodiff op train); torch side: `bench_kda.py`
 (fla `chunk_kda`, the K3 Triton path that FlashKDA accelerates).
 
-| config | burn fwd | fla fwd | burn train | fla train |
-|--------|----------|---------|------------|-----------|
-| d=512, h=4, hk=64, T=1024 | 0.06 ms | 1.0 ms | 81 ms | 2.8 ms |
-| d=1024, h=8, hk=64, T=2048 | 0.09 ms | 1.0 ms | 148 ms | 4.7 ms |
-| d=2048, h=8, hk=128, T=4096 | 0.08 ms | 1.1 ms | 284 ms | 4.6 ms |
-| d=4096, h=8, hk=128, T=8192 | 0.06 ms | 2.1 ms | 733 ms | 8.2 ms |
+| config | burn fwd | fla fwd | burn module train | fla train |
+|--------|----------|---------|-------------------|-----------|
+| d=512, h=4, hk=64, T=1024 | 0.10 ms | 1.0 ms | 0.36 ms | 2.8 ms |
+| d=1024, h=8, hk=64, T=2048 | 0.05 ms | 1.0 ms | 0.43 ms | 4.7 ms |
+| d=2048, h=8, hk=128, T=4096 | 0.05 ms | 1.1 ms | 0.42 ms | 4.6 ms |
+| d=4096, h=8, hk=128, T=8192 | 0.05 ms | 2.1 ms | 0.43 ms | 8.2 ms |
 
 Forward: **15-40x faster than the Triton reference** (2 fused launches per
 chunk vs Triton's per-chunk kernel set; FlashKDA's CUTLASS path was not
 buildable here - it needs a CUDA 12.8 toolkit matching torch cu128).
 
-Training: the fused autodiff op's backward is still the exact tensor-path
-adjoint (launch-bound at chunk 16), so it trails the fused Triton backward.
-The fused backward kernels are the next stage.
+Training: with burn-gdn2 0.7.5 the fused chunked backward (BK2 inter BPTT +
+BK1 intra adjoint) runs on 2 kernels, and the fused op path skips the
+per-chunk scratch, so the module train (projections included) is **0.36-0.43
+ms** — **7-24x faster than the Triton reference's raw attention-core train**.
